@@ -1,7 +1,10 @@
 import numpy as np
 import pandas as pd
 import networkx as nx
+from multiprocessing.dummy import Pool as ThreadPool
+import pickle
 from collections import defaultdict
+
 
 structures = pd.read_csv('./input/structures.csv')
 atomic_radii = dict(C=0.77, F=0.71, H=0.38, N=0.75, O=0.73)
@@ -94,7 +97,7 @@ class MoleculeFeatures:
             atoms_num_dict[self.atoms[i]] += 1
         for atom_type, num in atoms_num_dict.items():
             res[f'{name_space}#{atom_type}_num'] = num
-        s = np.linalg.eigvalsh(np.cov(mp.coordinates[atoms_idx, :].T))[::-1]
+        s = np.linalg.eigvalsh(np.cov(self.coordinates[atoms_idx, :].T))[::-1]
         eigen_ratio = np.cumsum(s)/np.sum(s)
         res[f'{name_space}#eigen_ratio_1d'] = eigen_ratio[0]
         res[f'{name_space}#eigen_ratio_2d'] = eigen_ratio[1]
@@ -225,34 +228,42 @@ class MoleculeFeatures:
         return res
 
 def pool_worker(molecule):
-    return [molecule, MoleculeFeatures(molecule).main()]
+    with open(f'./result/molecule_features/{molecule}.pkl', 'wb') as f:
+        pickle.dump(MoleculeFeatures(molecule).main(), f)
 
-def parse_features_dict(features_dict):
-    names = ['1JHC', '1JHN', '2JHH', '2JHC', '2JHN', '3JHH', '3JHC', '3JHN']
-    features_molecule = pd.DataFrame.from_dict({k: features_dict[k]['molecule_features'] for k in features_dict}, 'index')
+def parse_features_dict(molecule_names):
+    coupling_types = ['1JHC', '1JHN', '2JHH', '2JHC', '2JHN', '3JHH', '3JHC', '3JHN']
+    # molecule features
+    features_molecule = {}
+    def molecule_worker(molecule):
+        tmp = pickle.load(open(f'./result/molecule_features/{molecule}.pkl', 'rb'))
+        features_molecule[molecule] = tmp['molecule_features']
+    with ThreadPool() as pool:
+        pool.map(molecule_worker, molecule_names)
+    features_molecule = pd.DataFrame.from_dict(features_molecule, 'index')
     features_molecule.index.set_names('molecule_name', inplace=True)
     features_molecule.reset_index(inplace=True)
     features_molecule.to_csv('./input/features_molecule.csv', index=False)
     del features_molecule
-    for name in names:
+
+    # coupling features for each type
+    def coupling_worker(coupling_type, res_dict, molecule):
+        tmp = pickle.load(open(f'./result/molecule_features/{molecule}.pkl', 'rb'))
+        for idx1, idx2 in tmp['couplings_features'][coupling_type]:
+            res_dict[(molecule, idx1, idx2)] = tmp['couplings_features'][coupling_type][(idx1, idx2)]
+    for coupling_type in coupling_types:
         tmp = {}
-        for k in features_dict:
-            for idx1, idx2 in features_dict[k]['couplings_features'][name]:
-                tmp[(k, idx1, idx2)] = res[k]['couplings_features'][name][(idx1, idx2)]
+        with ThreadPool() as pool:
+            pool.map(lambda molecule: coupling_worker(coupling_type, tmp, molecule), molecule_names)
         features_tmp = pd.DataFrame.from_dict(tmp, 'index')
         features_tmp.index.set_names(['molecule_name', 'atom_index_0', 'atom_index_1'], inplace=True)
         features_tmp.reset_index(inplace=True)
-        features_tmp.to_csv(f'./input/features_{name}.csv', index=False)
+        features_tmp.to_csv(f'./input/features_{coupling_type}.csv', index=False)
         del tmp, features_tmp
 
-
 if __name__ == '__main__':
-    import time
-    t0 = time.time()
     res = {}
-    for i in range(100, 200):
-        molecule = molecule_names[i]
-        mp = MoleculeFeatures(molecule)
-        res.update({molecule: mp.main()})
-    print(time.time()-t0)
-    parse_features_dict(res)
+    for x in molecule_names[1000:1100]:
+        pool_worker(x)
+    parse_features_dict(molecule_names[1000:1100])
+
